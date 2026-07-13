@@ -15,7 +15,9 @@ local Ollama daemon running) -- see .env.example and README.md.
 """
 
 import logging
+import os
 import sys
+from typing import Any
 
 from crewai import Crew, Process
 from dotenv import load_dotenv
@@ -28,6 +30,33 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("qa_agent_crew")
+
+
+def _write_github_step_summary(result: Any) -> None:
+    """Write each agent's output to the GitHub Actions job summary page.
+
+    GITHUB_STEP_SUMMARY is a file path GitHub Actions sets for every step;
+    anything appended to it renders as Markdown on the run's Summary tab,
+    so the 5 agents' answers are readable without opening the raw logs.
+    It's only set on Actions runners -- a no-op for local runs.
+    """
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+
+    sections = ["# QA Agent Crew -- Run Summary\n"]
+    for task_output in result.tasks_output:
+        sections.append(
+            f"<details open>\n<summary><strong>{task_output.agent}</strong></summary>\n\n"
+            f"{task_output.raw}\n\n</details>\n"
+        )
+
+    try:
+        with open(summary_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(sections))
+            f.write("\n")
+    except OSError as exc:
+        logger.warning("Could not write GitHub step summary: %s", exc)
 
 
 def main() -> int:
@@ -66,6 +95,7 @@ def main() -> int:
         "\nReports written to reports/release_report.md and docs/index.html "
         "(if the Release Reporter agent completed successfully)."
     )
+    _write_github_step_summary(result)
     return 0
 
 

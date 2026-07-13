@@ -103,9 +103,12 @@ whole pipeline live on every push to `main` and on manual trigger:
    (either one is enough to run; both gives you the fallback safety net.)
 3. Push to `main`, or trigger manually from the Actions tab
    ("QA Agent Crew" → Run workflow).
-4. Watch the 5 agents think and act live in the Actions log. The
-   generated report is uploaded as a build artifact, and `docs/index.html`
-   is updated in the repo.
+4. Watch the 5 agents think and act live in the Actions log. When the run
+   finishes, open the **Summary** tab of that run (not the log) to read
+   each agent's answer in its own collapsible section, labeled by agent
+   name, without digging through logs. The generated report is also
+   uploaded as a build artifact, and `docs/index.html` is updated in the
+   repo.
 
 ### Publish the report with GitHub Pages (optional)
 
