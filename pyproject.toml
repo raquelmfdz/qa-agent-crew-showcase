@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+# Without this, bare `pytest` (as opposed to `python -m pytest`) doesn't
+# put the repo root on sys.path when there's no __init__.py in the test
+# directories -- imports like `from config.models import ...` or
+# `from main import ...` in tests_unit/ fail with ModuleNotFoundError.
+# `python -m pytest` masks this locally (it adds the cwd to sys.path
+# itself), which is why this only surfaced running in CI.
+pythonpath = ["."]
