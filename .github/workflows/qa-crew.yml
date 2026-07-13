@@ -29,6 +29,13 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
+      - name: Run unit tests (pipeline's own code)
+        # Fast and deterministic -- no API keys or browsers needed. Covers
+        # the LLM fallback chain and report renderer, which is where real
+        # bugs have surfaced before. Runs before anything LLM-dependent so
+        # a plumbing regression fails in seconds, not minutes.
+        run: pytest tests_unit/ -v
+
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
 

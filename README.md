@@ -50,7 +50,7 @@ builds a chain from whichever providers have credentials in the
 environment and retries the next one on auth/rate-limit/model-not-found
 errors:
 
-1. **Gemini** (`gemini-2.5-flash`) via the free Google AI Studio tier — primary.
+1. **Gemini** (`gemini-flash-latest`) via the free Google AI Studio tier — primary. The "-latest" alias auto-updates to Google's current recommended Flash model, so a dated model ID (e.g. `gemini-2.5-flash`) doesn't quietly break when Google sunsets it for new users.
 2. **Groq** (`llama-3.3-70b-versatile`) free tier — secondary.
 3. **Ollama** (local `llama3.1`) — last-resort, local-only fallback (no daemon in CI).
 
@@ -88,6 +88,18 @@ You can also just run the checked-in sample tests without the agents:
 pytest tests/ -v
 ```
 
+### Testing the pipeline itself
+
+`tests/` is the generated Playwright suite *against SauceDemo* -- what
+the agents produce and analyze. The pipeline's own code (the LLM
+fallback chain, the report renderer) has a separate unit test suite that
+needs no API keys or browsers, and runs first in CI so a plumbing
+regression fails in seconds:
+
+```bash
+pytest tests_unit/ -v
+```
+
 ## Run in CI (GitHub Actions)
 
 [`.github/workflows/qa-crew.yml`](.github/workflows/qa-crew.yml) runs the
@@ -122,7 +134,8 @@ time the workflow runs.
 qa-agent-crew/
   agents/            Agent role/goal/backstory definitions + custom tools
   tasks/              CrewAI task definitions wiring agents into a pipeline
-  tests/              Sample + agent-generated Playwright tests
+  tests/              Sample + agent-generated Playwright tests (target: SauceDemo)
+  tests_unit/         Unit tests for the pipeline's own code (fallback chain, renderer)
   config/             Model IDs and provider fallback order (edit here)
   reports/            Generated reports (gitignored except a checked-in sample)
   docs/index.html     Published report, served via GitHub Pages
