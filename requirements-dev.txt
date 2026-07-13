@@ -1,0 +1,2 @@
+# Dev-only tooling, not needed to run the pipeline itself.
+ruff>=0.6.0

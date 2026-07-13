@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 
 from agents.definitions import build_agents
 from tasks.definitions import build_tasks
+from verdict import VERDICT_TOKENS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,7 +36,7 @@ logger = logging.getLogger("qa_agent_crew")
 # Matches the Release Reporter's isolated "**GO**" / "**NO-GO**" verdict
 # (see tasks/definitions.py, which requires the verdict be bolded on its
 # own with nothing else inside the bold markers).
-_MD_VERDICT_PATTERN = re.compile(r"\*\*\s*(NO-GO|GO)\s*\*\*", re.IGNORECASE)
+_MD_VERDICT_PATTERN = re.compile(rf"\*\*\s*({VERDICT_TOKENS})\s*\*\*", re.IGNORECASE)
 
 
 def _extract_verdict_callout(release_reporter_raw: str) -> str:

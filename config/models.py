@@ -63,4 +63,17 @@ PROVIDER_CHAIN: list[ProviderConfig] = [
 # Reasonable defaults so a single slow/rate-limited call can't hang the
 # whole pipeline forever. Kept small since this is a showcase, not prod.
 REQUEST_TIMEOUT_SECONDS = 60
+
+# How many extra attempts a transient failure (rate limit, 5xx, timeout) on
+# the CURRENT provider gets before the fallback chain advances to the next
+# one. A 429 often clears within a couple seconds, so it's usually cheaper
+# to retry in place than to jump providers. Non-transient failures (auth,
+# model-not-found) skip retries entirely -- see llm/factory.py.
 MAX_RETRIES_PER_PROVIDER = 1
+RETRY_BACKOFF_SECONDS = 2.0
+
+# Once the chain has fallen through to a later provider, how long to stay
+# "pinned" there before giving the earlier, preferred provider another
+# chance. Without this, a single transient failure early in a long run
+# permanently demotes the preferred provider even after it recovers.
+PIN_COOLDOWN_SECONDS = 60.0

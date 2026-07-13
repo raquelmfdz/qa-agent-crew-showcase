@@ -18,7 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 from crewai import LLM
 
-from config.models import ProviderConfig
+import llm.factory as factory
+from config.models import MAX_RETRIES_PER_PROVIDER, PIN_COOLDOWN_SECONDS, ProviderConfig
 from llm.factory import FallbackLLM, _strip_cache_breakpoint, get_llm
 
 
@@ -30,6 +31,12 @@ def _mock_llm(model: str) -> MagicMock:
     mock = MagicMock(spec=LLM)
     mock.model = model
     return mock
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Retries use time.sleep() for backoff; tests shouldn't actually wait.
+    monkeypatch.setattr(factory.time, "sleep", lambda _seconds: None)
 
 
 class TestStripCacheBreakpoint:
@@ -103,6 +110,54 @@ class TestFallbackLLM:
             fb.call("hi")
         second.call.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "bug_message",
+        [
+            # Contains "500" as a substring of an unrelated number, not a
+            # status code -- must not be mistaken for a fallthrough-worthy
+            # HTTP 500. This used to fall through on luck alone.
+            "dataset must contain at least 1500 rows",
+            "request exceeded its 500ms budget",
+        ],
+    )
+    def test_does_not_fall_through_when_bug_message_contains_a_status_like_substring(
+        self, bug_message: str
+    ) -> None:
+        first = _mock_llm("first/model")
+        first.call.side_effect = ValueError(bug_message)
+        second = _mock_llm("second/model")
+
+        fb = FallbackLLM([(_provider("first", first.model), first), (_provider("second", second.model), second)])
+
+        with pytest.raises(ValueError, match=bug_message):
+            fb.call("hi")
+        second.call.assert_not_called()
+
+    def test_retries_a_transient_failure_on_the_same_provider_before_falling_back(self) -> None:
+        first = _mock_llm("first/model")
+        first.call.side_effect = [Exception("429 rate limit exceeded"), "recovered on retry"]
+        second = _mock_llm("second/model")
+
+        fb = FallbackLLM([(_provider("first", first.model), first), (_provider("second", second.model), second)])
+        result = fb.call("hi")
+
+        assert result == "recovered on retry"
+        assert fb._active_index == 0
+        assert first.call.call_count == MAX_RETRIES_PER_PROVIDER + 1
+        second.call.assert_not_called()
+
+    def test_does_not_retry_a_permanent_failure_before_falling_back(self) -> None:
+        first = _mock_llm("first/model")
+        first.call.side_effect = Exception("401 Unauthorized: invalid api key")
+        second = _mock_llm("second/model")
+        second.call.return_value = "handled"
+
+        fb = FallbackLLM([(_provider("first", first.model), first), (_provider("second", second.model), second)])
+        result = fb.call("hi")
+
+        assert result == "handled"
+        assert first.call.call_count == 1
+
     def test_raises_when_every_provider_fails(self) -> None:
         first = _mock_llm("first/model")
         first.call.side_effect = Exception("429 rate limited")
@@ -140,6 +195,31 @@ class TestFallbackLLM:
 
         first.call.assert_not_called()
         assert second.call.call_count == 2
+
+    def test_gives_the_preferred_provider_another_chance_after_the_cooldown(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        first = _mock_llm("first/model")
+        # A permanent-class failure (no retry budget spent) followed by a
+        # success, once we come back to it after the cooldown.
+        first.call.side_effect = [Exception("404 model_not_found"), "first is back"]
+        second = _mock_llm("second/model")
+        second.call.return_value = "handled by second"
+
+        fb = FallbackLLM([(_provider("first", first.model), first), (_provider("second", second.model), second)])
+
+        clock = [1000.0]
+        monkeypatch.setattr(factory.time, "monotonic", lambda: clock[0])
+
+        fb.call("first call")  # first fails, pins to second
+        assert fb._active_index == 1
+
+        clock[0] += PIN_COOLDOWN_SECONDS + 1
+        result = fb.call("second call")
+
+        assert result == "first is back"
+        assert fb._active_index == 0
+        second.call.assert_called_once()
 
 
 class TestGetLlm:

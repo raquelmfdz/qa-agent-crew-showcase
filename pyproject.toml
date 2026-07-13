@@ -6,3 +6,12 @@
 # `python -m pytest` masks this locally (it adds the cwd to sys.path
 # itself), which is why this only surfaced running in CI.
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 115
+
+[tool.ruff.lint]
+# E/F: standard pyflakes/pycodestyle. I: import sorting. BLE: flake8-blind-except,
+# for the "# noqa: BLE001" in llm/factory.py to mean anything -- otherwise that
+# comment silently suppresses a check nothing was ever running.
+select = ["E", "F", "I", "BLE"]

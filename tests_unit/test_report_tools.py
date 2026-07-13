@@ -43,6 +43,20 @@ class TestSavePlaywrightTest:
         result = save_playwright_test.func(filename="checkout.py", code="def test_x(): pass")
         assert "Rejected" in result
 
+    def test_rejects_syntactically_broken_generated_code_without_writing_it(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A free-tier model occasionally freehands broken Python; this
+        # must be caught before it ever hits disk, not surface later as an
+        # opaque pytest collection error indistinguishable from a red suite.
+        monkeypatch.setattr(tools_module, "TESTS_DIR", tmp_path / "tests")
+        monkeypatch.setattr(tools_module, "REPO_ROOT", tmp_path)
+
+        result = save_playwright_test.func(filename="test_broken.py", code="def test_x(:\n    pass")
+
+        assert "Rejected" in result
+        assert not (tmp_path / "tests" / "test_broken.py").exists()
+
     def test_writes_a_valid_filename_to_the_tests_dir(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setattr(tools_module, "TESTS_DIR", tmp_path / "tests")
         monkeypatch.setattr(tools_module, "REPO_ROOT", tmp_path)

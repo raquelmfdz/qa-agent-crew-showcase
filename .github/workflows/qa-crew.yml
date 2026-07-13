@@ -27,7 +27,10 @@ jobs:
           cache: "pip"
 
       - name: Install Python dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
 
       - name: Run unit tests (pipeline's own code)
         # Fast and deterministic -- no API keys or browsers needed. Covers

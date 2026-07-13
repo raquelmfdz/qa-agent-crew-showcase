@@ -16,12 +16,21 @@ not "handles every conceivable failure mode".
 
 import logging
 import os
+import re
+import time
 from typing import Any
 
 from crewai import LLM, BaseLLM
 from pydantic import PrivateAttr
 
-from config.models import PROVIDER_CHAIN, REQUEST_TIMEOUT_SECONDS, ProviderConfig
+from config.models import (
+    MAX_RETRIES_PER_PROVIDER,
+    PIN_COOLDOWN_SECONDS,
+    PROVIDER_CHAIN,
+    REQUEST_TIMEOUT_SECONDS,
+    RETRY_BACKOFF_SECONDS,
+    ProviderConfig,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,29 +55,54 @@ def _strip_cache_breakpoint(messages: Any) -> Any:
     ]
 
 
-# Substrings that identify a "try the next provider" failure. CrewAI/LiteLLM
-# wrap provider SDK exceptions, so we match on message content rather than
-# exception type to stay robust across providers.
-_FALLTHROUGH_MARKERS = (
+# How a failure is handled: retried in place, immediately demoted to the
+# next provider, or re-raised as a genuine bug.
+_FAILURE_TRANSIENT = "transient"
+_FAILURE_PERMANENT = "permanent"
+_FAILURE_FATAL = "fatal"
+
+# litellm's exception mapping (used for the Groq/Ollama path) and the
+# google-genai SDK (used for Gemini) both attach the real HTTP-ish status
+# to every mapped/API error -- `status_code` and `code` respectively. That
+# is a far more reliable signal than message text, so it's checked first.
+# Message-substring matching below only kicks in for exceptions that carry
+# neither attribute (e.g. a raw socket error before any SDK gets to wrap
+# it).
+_TRANSIENT_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
+_PERMANENT_STATUS_CODES = frozenset({401, 403, 404})
+
+
+def _status_code(exc: Exception) -> int | None:
+    for attr in ("status_code", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
+def _compile_marker(marker: str) -> re.Pattern[str]:
+    # Bare numeric markers ("500", "429", ...) are \b-bounded so they don't
+    # match inside an unrelated number like "1500 tokens" or "500ms" -- a
+    # plain substring check used to do exactly that. Phrase markers stay
+    # unbounded so inflected forms ("rate limited") still match.
+    pattern = rf"\b{re.escape(marker)}\b" if marker.isdigit() else re.escape(marker)
+    return re.compile(pattern, re.IGNORECASE)
+
+
+def _compile_markers(*markers: str) -> tuple[re.Pattern[str], ...]:
+    return tuple(_compile_marker(m) for m in markers)
+
+
+# Transient: retried in place first, then falls through if retries are
+# exhausted. Free-tier models get overloaded ("high demand") far more
+# often than dedicated paid capacity, so these need to recover gracefully,
+# not crash the whole pipeline.
+_TRANSIENT_MARKERS = _compile_markers(
     "rate limit",
     "rate_limit",
     "ratelimit",
     "429",
     "quota",
-    "authentication",
-    "unauthorized",
-    "401",
-    "403",
-    "api key",
-    "invalid_api_key",
-    "model_not_found",
-    "does not exist",
-    "not found",
-    "404",
-    # Transient server-side outages -- exactly what a fallback chain is
-    # for. Free-tier models get overloaded ("high demand") far more often
-    # than dedicated paid capacity, so these need to fall through too,
-    # not crash the whole pipeline.
     "503",
     "502",
     "500",
@@ -79,11 +113,45 @@ _FALLTHROUGH_MARKERS = (
     "server error",
     "try again later",
     "temporarily",
-    "timeout",
+    "temporary",
     "timed out",
     "connection error",
     "connection reset",
 )
+
+# Permanent: retrying the same provider can't fix a bad key or a
+# deprecated model, so these skip straight to the next provider.
+# Deliberately narrow -- generic words like "not found" or "timeout" also
+# show up in genuine application bugs (e.g. a KeyError message, an
+# assertion on a 404-shaped fixture) and would silently swallow those as
+# "recoverable" instead of surfacing them.
+_PERMANENT_MARKERS = _compile_markers(
+    "401",
+    "403",
+    "404",
+    "authentication",
+    "unauthorized",
+    "api key",
+    "invalid_api_key",
+    "model_not_found",
+)
+
+
+def _classify_failure(exc: Exception) -> str:
+    status_code = _status_code(exc)
+    if status_code is not None:
+        if status_code in _TRANSIENT_STATUS_CODES:
+            return _FAILURE_TRANSIENT
+        if status_code in _PERMANENT_STATUS_CODES:
+            return _FAILURE_PERMANENT
+        return _FAILURE_FATAL
+
+    message = str(exc)
+    if any(pattern.search(message) for pattern in _TRANSIENT_MARKERS):
+        return _FAILURE_TRANSIENT
+    if any(pattern.search(message) for pattern in _PERMANENT_MARKERS):
+        return _FAILURE_PERMANENT
+    return _FAILURE_FATAL
 
 
 class FallbackLLM(BaseLLM):
@@ -100,6 +168,9 @@ class FallbackLLM(BaseLLM):
 
     _providers: list[tuple[ProviderConfig, LLM]] = PrivateAttr()
     _active_index: int = PrivateAttr(default=0)
+    # monotonic() timestamp of the last time we advanced _active_index past
+    # 0. None means we're on the preferred (first) provider.
+    _pinned_at: float | None = PrivateAttr(default=None)
 
     def __init__(self, available: list[tuple[ProviderConfig, LLM]]) -> None:
         if not available:
@@ -112,6 +183,7 @@ class FallbackLLM(BaseLLM):
         super().__init__(model=first_llm.model)
         self._providers = available
         self._active_index = 0
+        self._pinned_at = None
 
     def call(
         self,
@@ -126,43 +198,77 @@ class FallbackLLM(BaseLLM):
         last_error: Exception | None = None
         clean_messages = _strip_cache_breakpoint(messages)
 
+        if (
+            self._active_index > 0
+            and self._pinned_at is not None
+            and time.monotonic() - self._pinned_at >= PIN_COOLDOWN_SECONDS
+        ):
+            logger.info(
+                "%.0fs since falling back; giving '%s' another chance before "
+                "the rest of the chain.",
+                PIN_COOLDOWN_SECONDS,
+                self._providers[0][0].name,
+            )
+            self._active_index = 0
+            self._pinned_at = None
+
         for offset in range(len(self._providers) - self._active_index):
             index = self._active_index + offset
             provider_cfg, llm = self._providers[index]
-            try:
-                result = llm.call(
-                    clean_messages,
-                    tools=tools,
-                    callbacks=callbacks,
-                    available_functions=available_functions,
-                    from_task=from_task,
-                    from_agent=from_agent,
-                    response_model=response_model,
-                )
-                if index != self._active_index:
-                    logger.warning(
-                        "LLM fallback: now using '%s' (%s) after earlier "
-                        "provider failure.",
-                        provider_cfg.name,
-                        provider_cfg.model,
+            attempt = 0
+            while True:
+                try:
+                    result = llm.call(
+                        clean_messages,
+                        tools=tools,
+                        callbacks=callbacks,
+                        available_functions=available_functions,
+                        from_task=from_task,
+                        from_agent=from_agent,
+                        response_model=response_model,
                     )
-                    self._active_index = index
-                    self.model = llm.model
-                return result
-            except Exception as exc:  # noqa: BLE001 - intentionally broad, see module docstring
-                message = str(exc).lower()
-                is_falls_through = any(marker in message for marker in _FALLTHROUGH_MARKERS)
-                last_error = exc
-                if is_falls_through:
+                    if index != self._active_index:
+                        logger.warning(
+                            "LLM fallback: now using '%s' (%s) after earlier "
+                            "provider failure.",
+                            provider_cfg.name,
+                            provider_cfg.model,
+                        )
+                        self._active_index = index
+                        self._pinned_at = time.monotonic()
+                        self.model = llm.model
+                    return result
+                except Exception as exc:  # noqa: BLE001 - intentionally broad, see module docstring
+                    last_error = exc
+                    classification = _classify_failure(exc)
+
+                    if classification == _FAILURE_FATAL:
+                        # Not a fallthrough-worthy error (e.g. a genuine bug) -- re-raise.
+                        raise
+
+                    if classification == _FAILURE_TRANSIENT and attempt < MAX_RETRIES_PER_PROVIDER:
+                        attempt += 1
+                        backoff = RETRY_BACKOFF_SECONDS * attempt
+                        logger.warning(
+                            "Provider '%s' (%s) failed transiently (%s). "
+                            "Retrying in %.1fs (attempt %d/%d)...",
+                            provider_cfg.name,
+                            provider_cfg.model,
+                            exc,
+                            backoff,
+                            attempt,
+                            MAX_RETRIES_PER_PROVIDER,
+                        )
+                        time.sleep(backoff)
+                        continue
+
                     logger.warning(
                         "Provider '%s' (%s) failed (%s). Falling back to next provider...",
                         provider_cfg.name,
                         provider_cfg.model,
                         exc,
                     )
-                    continue
-                # Not a fallthrough-worthy error (e.g. a genuine bug) -- re-raise.
-                raise
+                    break
 
         raise RuntimeError(
             f"All configured LLM providers failed. Last error: {last_error}"

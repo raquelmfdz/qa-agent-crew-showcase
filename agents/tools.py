@@ -7,18 +7,29 @@ suite, write a report) so agents can take real actions instead of just
 producing text that a human would have to act on manually.
 """
 
+import ast
 import json
 import re
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import markdown as md
 from crewai.tools import tool
+
+from verdict import VERDICT_TOKENS
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = REPO_ROOT / "tests"
 REPORTS_DIR = REPO_ROOT / "reports"
 DOCS_DIR = REPO_ROOT / "docs"
+
+# How much of each subprocess/test-failure text blob to keep in the
+# summary handed to the Failure Analyst -- enough to reason about the
+# failure, not so much that a single noisy test blows the LLM's context.
+_STDOUT_TAIL_CHARS = 4000
+_STDERR_TAIL_CHARS = 2000
+_TEST_MESSAGE_CHARS = 1500
 
 
 @tool("Save Playwright test file")
@@ -38,9 +49,20 @@ def save_playwright_test(filename: str, code: str) -> str:
             f"Rejected filename '{filename}': must start with 'test_' and "
             "end with '.py' for pytest discovery."
         )
+    try:
+        ast.parse(code)
+    except SyntaxError as exc:
+        # A free-tier model occasionally freehands syntactically broken
+        # Python. Catching that here, before it ever touches disk, keeps
+        # a bad generation from becoming a pytest *collection* error --
+        # which run_playwright_suite would otherwise report as an
+        # indistinguishable part of a "red suite" rather than what it
+        # actually is: unusable generated code.
+        return f"Rejected '{filename}': generated code has a syntax error and was not saved: {exc}"
+
     TESTS_DIR.mkdir(parents=True, exist_ok=True)
     path = TESTS_DIR / filename
-    path.write_text(code)
+    path.write_text(code, encoding="utf-8")
     return f"Saved test file to {path.relative_to(REPO_ROOT)}"
 
 
@@ -56,15 +78,26 @@ def run_playwright_suite() -> str:
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     json_report_path = REPORTS_DIR / "results.json"
     junit_path = REPORTS_DIR / "results.xml"
+    artifacts_dir = REPORTS_DIR / "playwright-artifacts"
 
     cmd = [
         "python",
         "-m",
         "pytest",
         str(TESTS_DIR),
-        f"--json-report",
+        "--json-report",
         f"--json-report-file={json_report_path}",
         f"--junitxml={junit_path}",
+        # Against a live public site, a handful of flaky reruns beats a
+        # red suite caused by a one-off network blip rather than a real bug.
+        "--reruns=2",
+        "--reruns-delay=3",
+        # On the *final* failure (after reruns are exhausted), keep enough
+        # evidence to debug from without needing to reproduce it.
+        "--tracing=retain-on-failure",
+        "--screenshot=only-on-failure",
+        "--video=retain-on-failure",
+        f"--output={artifacts_dir}",
         "-v",
     ]
     try:
@@ -80,10 +113,10 @@ def run_playwright_suite() -> str:
     except FileNotFoundError as exc:
         return json.dumps({"error": f"Could not run pytest: {exc}"})
 
-    summary: dict = {
+    summary: dict[str, Any] = {
         "returncode": proc.returncode,
-        "stdout_tail": proc.stdout[-4000:],
-        "stderr_tail": proc.stderr[-2000:],
+        "stdout_tail": proc.stdout[-_STDOUT_TAIL_CHARS:],
+        "stderr_tail": proc.stderr[-_STDERR_TAIL_CHARS:],
     }
 
     if json_report_path.exists():
@@ -94,7 +127,7 @@ def run_playwright_suite() -> str:
                 {
                     "nodeid": t.get("nodeid"),
                     "outcome": t.get("outcome"),
-                    "message": (t.get("call") or {}).get("longrepr", "")[:1500],
+                    "message": (t.get("call") or {}).get("longrepr", "")[:_TEST_MESSAGE_CHARS],
                 }
                 for t in report.get("tests", [])
             ]
@@ -112,7 +145,7 @@ def run_playwright_suite() -> str:
 # we render it through one fixed, already-designed template here, so every
 # report looks the same regardless of which provider in the fallback
 # chain wrote the content.
-_VERDICT_PATTERN = re.compile(r"<(?:strong|b)>\s*(NO-GO|GO)\s*</(?:strong|b)>", re.IGNORECASE)
+_VERDICT_PATTERN = re.compile(rf"<(?:strong|b)>\s*({VERDICT_TOKENS})\s*</(?:strong|b)>", re.IGNORECASE)
 
 _HTML_TEMPLATE = """<!doctype html>
 <html lang="en">
@@ -264,8 +297,8 @@ def write_release_report(markdown_content: str) -> str:
     md_path = REPORTS_DIR / "release_report.md"
     html_path = DOCS_DIR / "index.html"
 
-    md_path.write_text(markdown_content)
-    html_path.write_text(_render_report_html(markdown_content))
+    md_path.write_text(markdown_content, encoding="utf-8")
+    html_path.write_text(_render_report_html(markdown_content), encoding="utf-8")
 
     return (
         f"Wrote report to {md_path.relative_to(REPO_ROOT)} and "
