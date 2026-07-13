@@ -25,6 +25,27 @@ from config.models import PROVIDER_CHAIN, REQUEST_TIMEOUT_SECONDS, ProviderConfi
 
 logger = logging.getLogger(__name__)
 
+# CrewAI tags messages with an internal "cache_breakpoint" bookkeeping key
+# for providers that support prompt caching (e.g. Anthropic). Native
+# provider classes (like Gemini's) strip it before sending; the generic
+# LiteLLM-routed path that Groq goes through does not (as of crewai
+# 1.15.x), so Groq's strict message-schema validation rejects the request
+# with a 400. We strip it ourselves so every provider in the chain gets a
+# clean message list regardless of upstream provider-specific bugs.
+_CACHE_BREAKPOINT_KEY = "cache_breakpoint"
+
+
+def _strip_cache_breakpoint(messages: Any) -> Any:
+    if not isinstance(messages, list):
+        return messages
+    return [
+        {k: v for k, v in msg.items() if k != _CACHE_BREAKPOINT_KEY}
+        if isinstance(msg, dict)
+        else msg
+        for msg in messages
+    ]
+
+
 # Substrings that identify a "try the next provider" failure. CrewAI/LiteLLM
 # wrap provider SDK exceptions, so we match on message content rather than
 # exception type to stay robust across providers.
@@ -85,13 +106,14 @@ class FallbackLLM(BaseLLM):
         response_model: Any = None,
     ) -> Any:
         last_error: Exception | None = None
+        clean_messages = _strip_cache_breakpoint(messages)
 
         for offset in range(len(self._providers) - self._active_index):
             index = self._active_index + offset
             provider_cfg, llm = self._providers[index]
             try:
                 result = llm.call(
-                    messages,
+                    clean_messages,
                     tools=tools,
                     callbacks=callbacks,
                     available_functions=available_functions,
