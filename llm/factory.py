@@ -65,6 +65,24 @@ _FALLTHROUGH_MARKERS = (
     "does not exist",
     "not found",
     "404",
+    # Transient server-side outages -- exactly what a fallback chain is
+    # for. Free-tier models get overloaded ("high demand") far more often
+    # than dedicated paid capacity, so these need to fall through too,
+    # not crash the whole pipeline.
+    "503",
+    "502",
+    "500",
+    "unavailable",
+    "overloaded",
+    "high demand",
+    "internal error",
+    "server error",
+    "try again later",
+    "temporarily",
+    "timeout",
+    "timed out",
+    "connection error",
+    "connection reset",
 )
 
 
