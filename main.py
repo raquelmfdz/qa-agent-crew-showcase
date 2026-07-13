@@ -16,6 +16,7 @@ local Ollama daemon running) -- see .env.example and README.md.
 
 import logging
 import os
+import re
 import sys
 from typing import Any
 
@@ -31,6 +32,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("qa_agent_crew")
 
+# Matches the Release Reporter's isolated "**GO**" / "**NO-GO**" verdict
+# (see tasks/definitions.py, which requires the verdict be bolded on its
+# own with nothing else inside the bold markers).
+_MD_VERDICT_PATTERN = re.compile(r"\*\*\s*(NO-GO|GO)\s*\*\*", re.IGNORECASE)
+
+
+def _extract_verdict_callout(release_reporter_raw: str) -> str:
+    """Pull the GO/NO-GO verdict + its immediate reasoning out of the
+    Release Reporter's output, for a quick, always-visible callout that
+    doesn't require expanding any section to read.
+    """
+    match = _MD_VERDICT_PATTERN.search(release_reporter_raw)
+    if not match:
+        return (
+            "_Could not detect a GO/NO-GO verdict -- see the Release "
+            "Reporter section above for the full report._"
+        )
+
+    verdict = match.group(1).upper()
+    emoji = "✅" if verdict == "GO" else "🛑"
+    reasoning = release_reporter_raw[match.end() :].lstrip("\n ").split("\n\n", 1)[0].strip()
+
+    callout = f"## {emoji} {verdict}"
+    if reasoning:
+        callout += f"\n\n{reasoning}"
+    return callout
+
 
 def _write_github_step_summary(result: Any) -> None:
     """Write each agent's output to the GitHub Actions job summary page.
@@ -39,17 +67,24 @@ def _write_github_step_summary(result: Any) -> None:
     anything appended to it renders as Markdown on the run's Summary tab,
     so the 5 agents' answers are readable without opening the raw logs.
     It's only set on Actions runners -- a no-op for local runs.
+
+    All 5 agent answers are collapsed by default so the page doesn't flood
+    the screen; the GO/NO-GO verdict is pulled out into its own
+    non-collapsible callout at the end for quick feedback at a glance.
     """
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if not summary_path:
+    if not summary_path or not result.tasks_output:
         return
 
     sections = ["# QA Agent Crew -- Run Summary\n"]
     for task_output in result.tasks_output:
         sections.append(
-            f"<details open>\n<summary><strong>{task_output.agent}</strong></summary>\n\n"
+            f"<details>\n<summary><strong>{task_output.agent}</strong></summary>\n\n"
             f"{task_output.raw}\n\n</details>\n"
         )
+
+    sections.append("---\n")
+    sections.append(_extract_verdict_callout(result.tasks_output[-1].raw))
 
     try:
         with open(summary_path, "a", encoding="utf-8") as f:
