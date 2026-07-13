@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Playwright / pytest artifacts
+.pytest_cache/
+test-results/
+playwright-report/
+
+# Generated reports (kept out of git except the checked-in sample)
+reports/*.json
+reports/*.xml
+reports/release_report.md
+!reports/sample_release_report.md
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+.claude/

@@ -1,0 +1,53 @@
+name: QA Agent Crew
+
+# Runs the full 5-agent CrewAI pipeline live in Actions.
+#
+# NOTE: keep this repo PUBLIC. Public repos get unlimited/free GitHub
+# Actions minutes; private repos only get a limited free quota. Nothing
+# else in this workflow requires a paid plan.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  run-crew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run QA agent crew
+        env:
+          # Read from repo secrets; only Gemini + Groq are realistically
+          # available in CI since Ollama needs a local daemon. Values are
+          # never printed -- GitHub Actions automatically masks secret
+          # values that appear in logs.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: python main.py
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qa-crew-report
+          path: |
+            reports/
+            docs/index.html
+          if-no-files-found: warn
