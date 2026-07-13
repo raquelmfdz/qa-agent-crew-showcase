@@ -35,7 +35,11 @@ class ProviderConfig:
 PROVIDER_CHAIN: list[ProviderConfig] = [
     ProviderConfig(
         name="gemini",
-        model="gemini/gemini-2.5-flash",
+        # "-latest" alias: Google hot-swaps this to the current recommended
+        # Flash model (with a 2-week deprecation notice before any swap),
+        # so we don't have to chase dated model IDs like "gemini-2.5-flash"
+        # every time Google sunsets one for new users.
+        model="gemini/gemini-flash-latest",
         api_key_env="GEMINI_API_KEY",
         free_tier_note="Free key at https://aistudio.google.com/app/apikey",
     ),
